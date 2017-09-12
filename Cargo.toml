@@ -1,0 +1,7 @@
+[package]
+name = "rusto_rusto"
+version = "0.1.0"
+authors = ["Toni Okuogume <tokuogume@gmail.com>"]
+
+[dependencies]
+ggez = "0.3"
