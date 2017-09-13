@@ -1,11 +1,14 @@
 extern crate ggez;
 extern crate snowflake;
+extern crate rand;
 use snowflake::*;
 use ggez::*;
 use ggez::event::*;
 use ggez::graphics::{DrawMode, Point, Rect, Color};
 use std::time::Duration;
 use std::collections::{HashMap};
+use rand::Rng;
+use rand::distributions::{IndependentSample, Range};
 
 pub const BLACK: Color = Color { r:0.0, b:0.0, g:0.0, a:1.0 };
 pub const WHITE: Color = Color { r:1.0, b:1.0, g:1.0, a:1.0 };
@@ -14,6 +17,13 @@ pub const RED: Color = Color { r:1.0, b:0.0, g:0.0, a:1.0 };
 pub const BLUE: Color = Color { r:0.0, b:0.0, g:1.0, a:1.0 };
 
 type ID = ProcessUniqueId;
+
+enum Position {
+    Left,
+    Right,
+    Top,
+    Bottom
+}
 
 struct Rusto {
     id: ID,
@@ -24,11 +34,15 @@ struct Rusto {
 
 impl Rusto {
     fn new(x:i32, y:i32) -> Rusto {
+        let colors = [LIMEGREEN, RED, BLUE];
+        let mut rng = rand::thread_rng();
+        let color_range_value = Range::new(0,3).ind_sample(&mut rng); 
+        let color = colors[color_range_value as usize];
         Rusto {
             id: ProcessUniqueId::new(),
             x: x,
             y: y,
-            color: RED
+            color: color
         }
     }
 }
@@ -130,6 +144,64 @@ impl MainState {
             _ => {}
         }
     }
+
+    fn check_side_rusto_position(&self) -> Position {
+        let main_rusto = self.rustos.get(&self.blob[0]).unwrap();
+        let side_rusto = self.rustos.get(&self.blob[1]).unwrap();
+        if side_rusto.x < main_rusto.x {
+            Position::Left
+        } else if side_rusto.x > main_rusto.x {
+            Position::Right
+        } else if side_rusto.y < main_rusto.y {
+            Position::Top
+        } else {
+            Position::Bottom
+        }
+    }
+
+    fn rotate_side_rusto_pos_in_blob(&mut self, new_pos: Position) {
+        let (main_x, main_y) = {
+            let main_rusto = self.rustos.get(&self.blob[0]).unwrap();
+            (main_rusto.x, main_rusto.y)
+        };
+        let mut side_rusto = self.rustos.get_mut(&self.blob[1]).unwrap();
+        match new_pos {
+            Position::Left => {
+                if main_x > 1 {
+                    side_rusto.x = main_x - 1;
+                    side_rusto.y = main_y;
+                }
+            }
+            Position::Right =>  {
+                if main_x < 6 {
+                    side_rusto.x = main_x + 1;
+                    side_rusto.y = main_y;
+                }
+            }
+            Position::Top =>  {
+                if main_y > -1 {
+                    side_rusto.x = main_x;
+                    side_rusto.y = main_y - 1;
+                }
+            }
+            Position::Bottom =>  {
+                if main_y < 10 {
+                    side_rusto.x = main_x;
+                    side_rusto.y = main_y + 1;
+                }
+            }
+        }
+    }
+
+    fn rotate_blob_clockwise(&mut self) {
+        let side_rusto_pos = self.check_side_rusto_position();
+        match side_rusto_pos {
+            Position::Left => { self.rotate_side_rusto_pos_in_blob(Position::Top) }
+            Position::Right => { self.rotate_side_rusto_pos_in_blob(Position::Bottom) }
+            Position::Top => { self.rotate_side_rusto_pos_in_blob(Position::Right) }
+            Position::Bottom => { self.rotate_side_rusto_pos_in_blob(Position::Left) }
+        }
+    }
     
     fn draw_rustos(&self, ctx: &mut Context) -> GameResult<()>{
         for (_, rusto) in self.rustos.iter() {
@@ -171,6 +243,9 @@ impl MainState {
     }
 
     fn check_blob_boundaries(&mut self, add_x: i32, add_y: i32) -> DropState {
+        let blob_ids: HashMap<ID,u32> = self.blob.iter()
+            .map(|id| (*id, 1 as u32))
+            .collect();
         for id in self.blob.iter() {
             let rusto: &Rusto = self.rustos.get(&id).unwrap(); 
             //bottom of screen
@@ -178,12 +253,21 @@ impl MainState {
                 return DropState::Drop
             }
             for (hash_id, hash_rusto) in self.rustos.iter() {
-                if id != hash_id && rusto.x + add_x == hash_rusto.x && rusto.y + add_y == hash_rusto.y {
+                if !blob_ids.contains_key(&hash_id) && rusto.x + add_x == hash_rusto.x && rusto.y + add_y == hash_rusto.y {
                     return DropState::Drop
                 }
             }
         }
         DropState::NotDrop
+    }
+
+    fn check_connectios(&mut self) {
+
+    }
+    
+    fn drop_blob(&mut self) {
+        self.blob = Vec::new();
+        self.check_connectios();
     }
 }
 
@@ -194,7 +278,7 @@ impl event::EventHandler for MainState {
             if self.blob.len() > 0 {
                 let drop_state: DropState = self.check_blob_boundaries(0, 1);
                 match drop_state {
-                    DropState::Drop => { self.blob = Vec::new() }
+                    DropState::Drop => { self.drop_blob(); }
                     DropState::NotDrop => {
                         for id in self.blob.iter() {
                             let mut rusto: &mut Rusto = self.rustos.get_mut(&id).unwrap(); 
@@ -223,7 +307,9 @@ impl event::EventHandler for MainState {
     fn key_down_event(&mut self, keycode: Keycode, _keymod: Mod, _repeat: bool) {
         match keycode {
             Keycode::Up => {
-                
+                if self.blob.len() > 0 {
+                    self.rotate_blob_clockwise();
+                }
             }
             Keycode::Left => {
                 self.move_blob(BlobDirections::Left);
