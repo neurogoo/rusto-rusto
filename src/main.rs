@@ -6,7 +6,7 @@ use ggez::*;
 use ggez::event::*;
 use ggez::graphics::{DrawMode, Point, Rect, Color};
 use std::time::Duration;
-use std::collections::{HashMap};
+use std::collections::{HashMap, HashSet};
 use rand::Rng;
 use rand::distributions::{IndependentSample, Range};
 
@@ -17,12 +17,20 @@ pub const RED: Color = Color { r:1.0, b:0.0, g:0.0, a:1.0 };
 pub const BLUE: Color = Color { r:0.0, b:0.0, g:1.0, a:1.0 };
 
 type ID = ProcessUniqueId;
+type Coord = i32;
 
 enum Position {
     Left,
     Right,
     Top,
     Bottom
+}
+
+enum GameState {
+    Menu,
+    Playing,
+    Pause,
+    GameOver
 }
 
 struct Rusto {
@@ -33,8 +41,8 @@ struct Rusto {
 }
 
 impl Rusto {
-    fn new(x:i32, y:i32) -> Rusto {
-        let colors = [LIMEGREEN, RED, BLUE];
+    fn new(x:Coord, y:Coord) -> Rusto {
+        let colors = Rusto::get_color_vector();
         let mut rng = rand::thread_rng();
         let color_range_value = Range::new(0,3).ind_sample(&mut rng); 
         let color = colors[color_range_value as usize];
@@ -44,6 +52,10 @@ impl Rusto {
             y: y,
             color: color
         }
+    }
+
+    fn get_color_vector() -> Vec<Color> {
+        vec![LIMEGREEN, RED, BLUE]
     }
 }
 
@@ -67,6 +79,9 @@ struct MainState {
     blob: Vec<ID>,
     drop_timer: f64,
     current_score: u32,
+    state: GameState,
+    ROW_START: Coord,
+    ROW_END: Coord
 }
 
 enum BlobDirections {
@@ -90,6 +105,9 @@ impl MainState {
             blob: Vec::new(),
             drop_timer: 0.0,
             current_score: 0,
+            state: GameState::Playing,
+            ROW_START: 1,
+            ROW_END: 6
         };
         s.blob = MainState::new_blob(&mut s);
         Ok(s)
@@ -97,11 +115,11 @@ impl MainState {
 
     fn new_blob(s: &mut MainState) -> Vec<ID> {
         let mut new_blob: Vec<ID> = Vec::new();
-        let new_rusto = Rusto::new(3,3);
+        let new_rusto = Rusto::new(3,1);
         let new_rusto_id = new_rusto.id;
         s.rustos.insert(new_rusto.id, new_rusto);
         new_blob.push(new_rusto_id);
-        let new_rusto = Rusto::new(2,3);
+        let new_rusto = Rusto::new(2,1);
         let new_rusto_id = new_rusto.id;
         s.rustos.insert(new_rusto_id, new_rusto);
         new_blob.push(new_rusto_id);
@@ -120,7 +138,7 @@ impl MainState {
             BlobDirections::Left => {
                 for id in self.blob.iter() {
                     let rusto = self.rustos.get(&id).unwrap();
-                    if rusto.x <= 1 {
+                    if rusto.x <= self.ROW_START {
                         return;
                     }
                 }
@@ -167,13 +185,13 @@ impl MainState {
         let mut side_rusto = self.rustos.get_mut(&self.blob[1]).unwrap();
         match new_pos {
             Position::Left => {
-                if main_x > 1 {
+                if main_x > self.ROW_START {
                     side_rusto.x = main_x - 1;
                     side_rusto.y = main_y;
                 }
             }
             Position::Right =>  {
-                if main_x < 6 {
+                if main_x < self.ROW_END {
                     side_rusto.x = main_x + 1;
                     side_rusto.y = main_y;
                 }
@@ -242,6 +260,16 @@ impl MainState {
         Ok(())
     }
 
+    fn draw_gameover(&self, ctx: &mut Context) -> GameResult<()> {
+        let game_over_text = graphics::Text::new(ctx, "GAME OVER", &self.assets.font)?;
+        let game_over_dest = graphics::Point::new(
+            (game_over_text.width() / 2) as f32 + 400.0,
+            (game_over_text.height() / 2) as f32 + 60.0,
+        );
+        graphics::draw(ctx, &game_over_text, game_over_dest, 0.0)?;
+        Ok(())
+    }
+
     fn check_blob_boundaries(&mut self, add_x: i32, add_y: i32) -> DropState {
         let blob_ids: HashMap<ID,u32> = self.blob.iter()
             .map(|id| (*id, 1 as u32))
@@ -261,37 +289,130 @@ impl MainState {
         DropState::NotDrop
     }
 
-    fn check_connectios(&mut self) {
+    fn make_adjacency_list_for_rusto(&self, rusto: &Rusto) -> Vec<ID> {
+        self.rustos.iter()            
+            .filter(|&(_,r)| rusto.color == r.color )
+            .filter(|&(_,r)| rusto.id != r.id)
+            .filter(|&(_,r)| {
+                (r.y == rusto.y && r.x + 1 == rusto.x)
+                    || (r.y == rusto.y && r.x - 1 == rusto.x )
+                    || (r.x == rusto.x && r.y + 1 == rusto.y )
+                    || (r.x == rusto.x && r.y - 1 == rusto.y ) })
+            .map(|(id,_)| *id)
+            .collect()
+    }
 
+    fn return_all_groups(&self, id: ID, adj_list: &HashMap<ID, Vec<ID>>, visited_nodes: &mut HashSet<ID>) -> Vec<ID> {
+        if visited_nodes.contains(&id) {
+            return Vec::new();
+        }
+        visited_nodes.insert(id);
+        adj_list.get(&id).unwrap().iter()
+            .flat_map(|id| {
+                let mut group = self.return_all_groups(*id, adj_list, visited_nodes);
+                group.push(*id);
+                group
+            })
+            .collect()
+    }
+    
+    fn get_all_groups(&mut self) -> Vec<Vec<ID>> {
+        let mut group_list: Vec<Vec<ID>> = Vec::new();
+        let adjacency_list: HashMap<ID, Vec<ID>> = self.rustos.iter()
+            .map(|(id,rusto)| (*id, self.make_adjacency_list_for_rusto(rusto)))
+            .collect();
+        let mut visited_nodes: HashSet<ID> = HashSet::new();
+        for (id,_) in self.rustos.iter() {
+            if !visited_nodes.contains(id) {
+                let mut group = self.return_all_groups(*id, &adjacency_list, &mut visited_nodes);
+                group.push(*id);
+                group.sort();
+                group.dedup();
+                group_list.push(group);
+            }
+        }
+        println!("Group list is {:?}", group_list);
+        group_list
+    }
+
+    fn drop_all_rustos(&mut self) {
+        let mut rustos_by_x: HashMap<Coord, Vec<ID>> = HashMap::new();
+        for (id, rusto) in self.rustos.iter() {
+            let rusto_vec = rustos_by_x.entry(rusto.x).or_insert(Vec::new());
+            rusto_vec.push(*id);
+        }
+
+        for (x, vec_id) in rustos_by_x.iter() {
+            let mut move_coff = 0;
+            let y_hash: HashMap<Coord, ID> = vec_id.iter()
+                .map(|id| (self.rustos.get(id).unwrap().y, *id))
+                .collect();
+            for y in (1..11).rev() {
+                if y_hash.contains_key(&y) {
+                    let id = y_hash.get(&y).unwrap();
+                    let mut rusto = self.rustos.get_mut(id).unwrap();
+                    rusto.y += move_coff;
+                } else {
+                    move_coff += 1;
+                }
+            }
+        }
+    }
+
+    fn remove_rusto(&mut self, id: ID) {
+        self.rustos.remove(&id);
+    }
+
+    fn regroup_rustos(&mut self) {
+        let mut regrouped = false;
+        let groups = self.get_all_groups();
+        for group in groups.iter() {
+            if group.len() > 3 {
+                regrouped = true;
+                self.current_score += 100;
+                for id in group.iter() {
+                    self.remove_rusto(*id);
+                }
+            }
+        }
+        self.drop_all_rustos();
+        if regrouped {
+            self.regroup_rustos();
+        }
     }
     
     fn drop_blob(&mut self) {
         self.blob = Vec::new();
-        self.check_connectios();
+        self.regroup_rustos();
     }
 }
 
 impl event::EventHandler for MainState {
     fn update(&mut self, ctx: &mut Context, dt: Duration) -> GameResult<()> {
-        self.drop_timer += timer::duration_to_f64(dt);
-        if self.drop_timer > 0.5 {
-            if self.blob.len() > 0 {
-                let drop_state: DropState = self.check_blob_boundaries(0, 1);
-                match drop_state {
-                    DropState::Drop => { self.drop_blob(); }
-                    DropState::NotDrop => {
-                        for id in self.blob.iter() {
-                            let mut rusto: &mut Rusto = self.rustos.get_mut(&id).unwrap(); 
-                            if rusto.y < 10 {
-                                rusto.y = rusto.y + 1;
+        match self.state {
+            GameState::Playing => {
+                self.drop_timer += timer::duration_to_f64(dt);
+                if self.drop_timer > 0.5 {
+                    if self.blob.len() > 0 {
+                        let drop_state: DropState = self.check_blob_boundaries(0, 1);
+                        match drop_state {
+                            DropState::Drop => { self.drop_blob(); }
+                            DropState::NotDrop => {
+                                for id in self.blob.iter() {
+                                    let mut rusto: &mut Rusto = self.rustos.get_mut(&id).unwrap(); 
+                                    if rusto.y < 10 {
+                                        rusto.y = rusto.y + 1;
+                                    }
+                                }
                             }
                         }
+                    } else {
+                        self.blob = MainState::new_blob(self);
                     }
+                    self.drop_timer = 0.0;
                 }
-            } else {
-                self.blob = MainState::new_blob(self);
             }
-            self.drop_timer = 0.0;
+            _ => {}
         }
         Ok(())
     }
@@ -301,26 +422,37 @@ impl event::EventHandler for MainState {
         self.draw_playarea(ctx)?;
         self.draw_rustos(ctx)?;
         self.draw_ui(ctx)?;
+        match self.state {
+            GameState::GameOver => {
+            }
+            _ => {}
+        }
         graphics::present(ctx);
         Ok(())
     }
     fn key_down_event(&mut self, keycode: Keycode, _keymod: Mod, _repeat: bool) {
-        match keycode {
-            Keycode::Up => {
-                if self.blob.len() > 0 {
-                    self.rotate_blob_clockwise();
+        match self.state {
+            GameState::Playing => {
+                match keycode {
+                    Keycode::Up => {
+                        if self.blob.len() > 0 {
+                            self.rotate_blob_clockwise();
+                        }
+                    }
+                    Keycode::Left => {
+                        self.move_blob(BlobDirections::Left);
+                    }
+                    Keycode::Right => {
+                        self.move_blob(BlobDirections::Right);
+                    }
+                    Keycode::Space => {
+                        
+                    }
+                    _ => (), // Do nothing
                 }
             }
-            Keycode::Left => {
-                self.move_blob(BlobDirections::Left);
-            }
-            Keycode::Right => {
-                self.move_blob(BlobDirections::Right);
-            }
-            Keycode::Space => {
-
-            }
-            _ => (), // Do nothing
+            GameState::GameOver => {}
+            _ => {}
         }
     }
 }
