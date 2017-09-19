@@ -80,8 +80,10 @@ struct MainState {
     drop_timer: f64,
     current_score: u32,
     state: GameState,
+    down_pressed: bool,
     ROW_START: Coord,
-    ROW_END: Coord
+    ROW_END: Coord,
+    COLUMN_END: Coord
 }
 
 enum BlobDirections {
@@ -105,9 +107,11 @@ impl MainState {
             blob: Vec::new(),
             drop_timer: 0.0,
             current_score: 0,
+            down_pressed: false,
             state: GameState::Playing,
             ROW_START: 1,
-            ROW_END: 6
+            ROW_END: 6,
+            COLUMN_END: 12,
         };
         s.blob = MainState::new_blob(&mut s);
         Ok(s)
@@ -128,8 +132,8 @@ impl MainState {
     
     fn rusto_world_to_screen_cords(&self, rusto: &Rusto) -> (f32,f32) {
         let rusto_size = 50.0;
-        let x_coff = 50.0;
-        let y_coff = 50.0;
+        let x_coff = 25.0;
+        let y_coff = 0.0;
         (x_coff + rusto.x as f32 * rusto_size, y_coff + rusto.y as f32 * rusto_size)
     }
 
@@ -150,7 +154,7 @@ impl MainState {
             BlobDirections::Right => {
                 for id in self.blob.iter() {
                     let rusto = self.rustos.get(&id).unwrap();
-                    if rusto.x > 6 {
+                    if rusto.x >= self.ROW_END {
                         return;
                     }
                 }
@@ -203,7 +207,7 @@ impl MainState {
                 }
             }
             Position::Bottom =>  {
-                if main_y < 10 {
+                if main_y < self.COLUMN_END {
                     side_rusto.x = main_x;
                     side_rusto.y = main_y + 1;
                 }
@@ -270,6 +274,16 @@ impl MainState {
         Ok(())
     }
 
+    fn draw_pause(&self, ctx: &mut Context) -> GameResult<()> {
+        let game_over_text = graphics::Text::new(ctx, "PAUSED", &self.assets.font)?;
+        let game_over_dest = graphics::Point::new(
+            (game_over_text.width() / 2) as f32 + 400.0,
+            (game_over_text.height() / 2) as f32 + 60.0,
+        );
+        graphics::draw(ctx, &game_over_text, game_over_dest, 0.0)?;
+        Ok(())
+    }
+
     fn check_blob_boundaries(&mut self, add_x: i32, add_y: i32) -> DropState {
         let blob_ids: HashMap<ID,u32> = self.blob.iter()
             .map(|id| (*id, 1 as u32))
@@ -277,7 +291,7 @@ impl MainState {
         for id in self.blob.iter() {
             let rusto: &Rusto = self.rustos.get(&id).unwrap(); 
             //bottom of screen
-            if rusto.y + add_y == 10 {
+            if rusto.y + add_y == self.COLUMN_END {
                 return DropState::Drop
             }
             for (hash_id, hash_rusto) in self.rustos.iter() {
@@ -364,6 +378,7 @@ impl MainState {
     }
 
     fn regroup_rustos(&mut self) {
+        self.drop_all_rustos();
         let mut regrouped = false;
         let groups = self.get_all_groups();
         for group in groups.iter() {
@@ -375,7 +390,6 @@ impl MainState {
                 }
             }
         }
-        self.drop_all_rustos();
         if regrouped {
             self.regroup_rustos();
         }
@@ -385,6 +399,14 @@ impl MainState {
         self.blob = Vec::new();
         self.regroup_rustos();
     }
+
+    fn is_game_over(&self) -> bool {
+        let blob_set: HashSet<ID> = self.blob.iter().map(|id| *id).collect();
+        self.rustos.iter()
+            .filter(|&(id,rusto)| !blob_set.contains(id) && rusto.y == 1 && (rusto.x == 3 || rusto.x == 4))
+            .collect::<Vec<_>>()
+            .len() > 0
+    }
 }
 
 impl event::EventHandler for MainState {
@@ -392,7 +414,7 @@ impl event::EventHandler for MainState {
         match self.state {
             GameState::Playing => {
                 self.drop_timer += timer::duration_to_f64(dt);
-                if self.drop_timer > 0.5 {
+                if self.drop_timer > 0.5 || self.down_pressed {
                     if self.blob.len() > 0 {
                         let drop_state: DropState = self.check_blob_boundaries(0, 1);
                         match drop_state {
@@ -400,20 +422,25 @@ impl event::EventHandler for MainState {
                             DropState::NotDrop => {
                                 for id in self.blob.iter() {
                                     let mut rusto: &mut Rusto = self.rustos.get_mut(&id).unwrap(); 
-                                    if rusto.y < 10 {
+                                    if rusto.y < self.COLUMN_END {
                                         rusto.y = rusto.y + 1;
                                     }
                                 }
                             }
                         }
                     } else {
-                        self.blob = MainState::new_blob(self);
+                        if self.is_game_over() {
+                            self.state = GameState::GameOver;
+                        } else {
+                            self.blob = MainState::new_blob(self);
+                        }
                     }
                     self.drop_timer = 0.0;
                 }
             }
             _ => {}
         }
+        self.down_pressed = false;
         Ok(())
     }
     
@@ -424,6 +451,10 @@ impl event::EventHandler for MainState {
         self.draw_ui(ctx)?;
         match self.state {
             GameState::GameOver => {
+                self.draw_gameover(ctx)?;
+            }
+            GameState::Pause => {
+                self.draw_pause(ctx)?;
             }
             _ => {}
         }
@@ -445,13 +476,31 @@ impl event::EventHandler for MainState {
                     Keycode::Right => {
                         self.move_blob(BlobDirections::Right);
                     }
+                    Keycode::Down => {
+                        self.down_pressed = true;
+                    }
                     Keycode::Space => {
-                        
+                        self.state = GameState::Pause;
                     }
                     _ => (), // Do nothing
                 }
             }
-            GameState::GameOver => {}
+            GameState::Pause => {
+                match keycode {
+                    Keycode::Space => {
+                        self.state = GameState::Playing;
+                    }
+                    _ => {}
+                }
+            }
+            GameState::GameOver => {
+                match keycode {
+                    Keycode::Return => {
+                        println!("Painoit enteriä");
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
